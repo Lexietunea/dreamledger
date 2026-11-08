@@ -138,3 +138,10 @@ Please read the [**Legal Disclaimer**](DISCLAIMER.md) before using anything here
 educational reference code — **not financial advice, and not audited.** Any strategy can lose funds.
 You are responsible for the keys you load, the parameters you set, and the orders you sign. Test on
 testnet first.
+
+
+Transactions has been made on the bot
+
+Order id: 8116567392432212187748
+
+transactions hash: 0x625bc3977b1211fd83553307b06ef83e7e566d37b8d1bdd683e62608cbc5d390
