@@ -1,147 +1,158 @@
-# dreamBot Kit
+# DreamLedger
 
-Build automated trading bots on [DreamDEX](https://docs.dreamdex.io) — the on-chain
-central-limit order book (CLOB) on [Somnia](https://somnia.network). This kit gives you a
-shared client library, five runnable strategies, operations docs for running a bot
-24/7, and the sanitized source of the top bots from the first DreamDEX alpha trading
-competition.
+**A rule-guarded perps bot for dreamDEX that writes every trade, and every trade it refuses, to an onchain journal on Somnia.**
 
-> **For competent TS / Python devs, zero prior DreamDEX knowledge required.** Everything on
-> the DreamDEX protocol itself is documented at **[docs.dreamdex.io](https://docs.dreamdex.io)** —
-> this repo does not rewrite the docs, it links to them and shows you working code.
+*DreamLedger is an independent community project. It is not affiliated with or endorsed by dreamDEX or Somnia.*
 
----
+Built for the [dreamDEX Perps Builder Bounty](https://dorahacks.io/hackathon/dreamdex-perps-bounty/detail) (MVP track, *bots and agents*). Runs on the **Somnia Tokyo testnet** (Hideki, chain ID `50383`). Testnet only: no real money.
 
-## What's inside
+> This repository is a fork of the official [dreamdex-bot-kit](https://github.com/somnia-chain/dreamdex-bot-kit) (MIT). The original kit README is kept at [`docs/KIT-README.md`](docs/KIT-README.md). Everything new lives in two folders:
+> - [`strategies/perp-journal`](strategies/perp-journal): the bot
+> - [`journal-contract`](journal-contract): the `DecisionJournal` smart contract
 
-| Path | What it is |
-| --- | --- |
-| [`packages/core`](packages/core) | Shared client — auth, REST, WebSocket, order execution, gotcha guards, nonce manager. TypeScript **and** Python. Every strategy imports it. |
-| [`packages/backtest`](packages/backtest) | Bar-by-bar backtest engine (`SimPool`, fill model, metrics). Drive it with `npm run backtest` — see [docs/backtesting.md](docs/backtesting.md). |
-| [`strategies/`](strategies) | Start with [`starter`](strategies/starter) — the simplest bot, where you edit one `decide()` function. Then full strategies: [market-making](strategies/market-making), [grid](strategies/grid), [momentum](strategies/momentum), [mean-reversion](strategies/mean-reversion), [twap](strategies/twap) (execution algo), and [ensemble](strategies/ensemble) (modular ensemble + optional LLM). Each is clone → configure → run, with its own README explaining the trade-offs. |
-| [`strategies/ec-*`](strategies) | The same idea on **event contracts** — binary Up/Down markets on BTC and ETH price, trading on the same order book through a different SDK: [ec-starter](strategies/ec-starter), [ec-maker](strategies/ec-maker), [ec-passive](strategies/ec-passive), [ec-laddering-bot](strategies/ec-laddering-bot), [ec-oracle-follow](strategies/ec-oracle-follow), [ec-settlement](strategies/ec-settlement). They share the repo and the Railway entrypoint with the spot bots and nothing else; see [docs/event-contracts.md](docs/event-contracts.md) first, because the sharp edges are different. |
-| [`strategies/perp-*`](strategies) | **Perpetual futures** on the Hideki testnet: [perp-starter](strategies/perp-starter), [perp-maker](strategies/perp-maker), [perp-funding](strategies/perp-funding), [perp-guard](strategies/perp-guard). They can trade your DreamDEX account through a bot key you link in the app, which can place and cancel orders but never withdraw; see [docs/perps.md](docs/perps.md). |
-| [`docs/`](docs) | The bot-specific knowledge the protocol docs don't cover: [getting started](docs/getting-started.md), [architecture](docs/architecture.md), [gotchas](docs/gotchas.md), [backtesting](docs/backtesting.md), [running 24/7](docs/24-7-operations.md), [session keys](docs/session-keys.md) (run a bot with a hot key that can't withdraw funds), [Railway deploy](docs/railway.md), [event contracts](docs/event-contracts.md), [perps](docs/perps.md). |
-| [`advanced/batch-7702`](advanced/batch-7702) | A **technique demo** (not a trading strategy): how to use EIP-7702 to batch multiple actions into a single transaction. |
-| [`tools/edge-analytics`](tools/edge-analytics) | An **analysis tool** (not a bot): measures whether a maker actually has an edge — captured spread vs adverse selection vs transactions-per-fill — from your own fills. Methodology in [docs/measuring-edge.md](docs/measuring-edge.md). |
-| [`examples/`](examples) | The real competition bots, sanitized to core code. Different architectures, languages, and tricks — read them to see how people actually did it. |
-| [`skills/`](skills) | [Agent Skills](skills) so an AI coding agent can build DreamDEX bots with the right context: a general [`somnia`](skills/somnia) skill and a [`dreamdex-bot`](skills/dreamdex-bot) skill (the core API, gotchas, and session keys). |
+## What it does
 
-## The one thing to know before you start
+You describe a strategy in a small `rules.json` file: the market, long or short, position size, leverage, take-profit, stop-loss, and a set of safety limits. The bot then:
 
-DreamDEX upgraded its spot contracts (June 2026). If you are reading older bot
-code (including most of `examples/`), it will call **`placeTakerOrderWithoutVault`** — that
-function is **removed**. There is now a single entry point:
+1. Publishes your rule set to the journal contract (its hash stamps every later entry).
+2. Waits for an entry signal (`manual`, `breakout` or `meanReversion`).
+3. Runs **pre-trade checks** before every order: data freshness, daily loss limit, open positions, cooldown, spread, leverage, position size and risk per trade.
+4. If a check fails, it **refuses the trade** and writes `REFUSED` plus a reason code (for example `MAX_SPREAD`) to the journal.
+5. If all checks pass, it places a real perps order on dreamDEX and writes a `TRADE` entry.
+6. It watches your take-profit and stop-loss and, when one fires, closes the position and journals the close.
 
-```solidity
-function placeOrder(
-    bool isBid, uint64 userData, uint256 price, uint256 quantity,
-    uint64 expireTimestampNs, uint8 orderType, uint8 selfMatchingOption,
-    address builder, uint96 builderFeeBpsTimes1k
-) external payable returns (bool success, uint128 orderId);
+Anyone can read the journal and check that the bot did only what the published rules allow, including every time it said no.
+
+## Who it is for
+
+- **Traders who want automation without a black box.** The rules are a short file, the limits are enforced on every order, and the record cannot be edited afterwards.
+- **People who want to show what their bot did.** A public, onchain log of decisions is checkable proof.
+- **Builders** who want a small, readable example of guardrails plus an onchain audit trail on top of the dreamDEX bot kit.
+
+## How it works with dreamDEX
+
+```
+rules.json ──> perp-journal bot ──> dreamDEX perps (Tokyo testnet): real orders
+                    │
+                    └──> DecisionJournal contract (Somnia Tokyo): trades + refusals
 ```
 
-`placeOrder` is now `payable` and **pulls funds from your wallet automatically** (auto-pull) —
-no separate deposit step for the common case. Everything in `packages/core` and `strategies/`
-uses this modern signature. See [docs/architecture.md](docs/architecture.md) for the funding
-model and [docs/gotchas.md](docs/gotchas.md) for the full list of things that will bite you.
+- The bot uses a **trading key** linked to your dreamDEX account through *Link a bot* in the app. It can place and cancel orders for your account but **cannot withdraw or send funds**.
+- Orders go through the kit's `perp-core` library, the same path as the kit's `perp-starter`.
+- The journal is a separate contract written to with the same bot wallet.
 
-## Quick start
+## Proof on Somnia Tokyo testnet (chain 50383)
 
-**Fastest path — a bot running in ~60s:**
+**Journal contract:** `0x259D6dEaa3027ccFda8ff9b088AC9d8048F656a9`
 
-```bash
-git clone <this repo> && cd dreamdex-bot-kit
-npm install
-npm run quickstart                # 3 questions → writes a safe dry-run .env
-npm run dev -w starter            # runs in DRY_RUN: logs orders, sends nothing
+| What | Reference |
+|---|---|
+| Rule set published (dry run, ETH-PERP) | tx `0x8e9166b559cb95f5ccffc187cb241db122f3c7946f75bf7cff2c75b87e065425` |
+| **Refusal journaled:** `REFUSED MAX_SPREAD` (spread 2.9 bps vs a 1 bps limit) | tx `0x450683639b32126bc3b933fb8a99b89a67deb11163c266db847331ce864f038f` |
+| Rule set published (BTC-PERP, guarded trade) | tx `0x6ec1397356bc6b110819cc2b7af17ed5f7ce44fc361c6b8c8647c614af77edb4` |
+| **Guarded trade:** long BTC-PERP via `perp-journal`, 0.00066 BTC @ 76030.9 | order `9573860174255268254693`, tx `0xa337185162df5996c477879b5ba1e16e026aa8d4aa3c1f26ce4ebfedb4d706b1` |
+| Trade journaled: `TRADE open` | tx `0xfc9112a01f3e8ba13ce0a6c101daabbbcf31c0c1471c15ef72b74cff908e36f0` |
+| Earlier real order (kit `perp-starter`, long BTC-PERP, Oct 28) | order `387381625547908994209`, tx `0x854ff9b53193b1cebf32fab32c93b36ded3b61adae4640f98fdf26656c4036ca` |
+| Earlier real order (kit `perp-starter`, long BTC-PERP, Nov 2) | order `8116567392432212187748`, tx `0x625bc3977b1211fd83553307b06ef83e7e566d37b8d1bdd683e62608cbc5d390` |
+
+## Run it
+
+**Prerequisites:** Node.js 22+, a dreamDEX testnet account at [app.testnet.dreamdex.io](https://app.testnet.dreamdex.io), and a **new testnet-only wallet** for the bot. Never use a wallet that holds real funds.
+
+1. **Install.**
+   ```bash
+   git clone https://github.com/Lexietunea/dreamledger.git
+   cd dreamledger
+   npm install
+   ```
+2. **Link the bot.** In the app, open your wallet, choose **Link a bot**, paste the bot wallet's address, and use **Top up** to give it gas (STT). Make sure your account has perps collateral.
+3. **Deploy the journal** (one time).
+   ```bash
+   cd journal-contract
+   npm install
+   cp .env.example .env        # set DEPLOYER_PRIVATE_KEY to the bot key
+   npm run deploy              # prints the contract address
+   cd ..
+   ```
+4. **Configure the bot.** Copy `.env.example` to `.env` in the repo root and set:
+   ```
+   PRIVATE_KEY=<bot key>
+   OWNER_ADDRESS=<your dreamDEX account address>
+   NETWORK=hideki
+   RPC_URL=https://api.hideki2.infra.testnet.somnia.network
+   JOURNAL_ADDRESS=<address from step 3>
+   DRY_RUN=true
+   ```
+   Check the setup with `npm run perp:doctor`.
+5. **Edit your rules** in `strategies/perp-journal/rules.json`.
+6. **Dry run** (no orders sent; refusals can still be journaled):
+   ```bash
+   JOURNAL_IN_DRY_RUN=true npm run dev -w perp-journal
+   ```
+   On PowerShell: `$env:JOURNAL_IN_DRY_RUN="true"; npm run dev -w perp-journal`.
+7. **Real run:** set `DRY_RUN=false`, set the account's leverage in the app to match your rules, and run `npm run dev -w perp-journal`. Keep the process running: see limitations below.
+
+To see a refusal quickly, set `"market": "ETH-PERP"` and `"maxSpreadBps": 1` in `rules.json` and do the dry run.
+
+### Environment variables added by this project
+
+| Variable | Meaning | Default |
+|---|---|---|
+| `JOURNAL_ADDRESS` | Deployed `DecisionJournal` contract | none (journal off) |
+| `JOURNAL_IN_DRY_RUN` | Write journal entries even when `DRY_RUN=true` | `false` |
+| `JOURNAL_REFUSAL_THROTTLE_MS` | Minimum time between journal writes for the same refusal reason | `300000` |
+| `PERP_EQUITY_USDSO` | Equity used for sizing and risk checks | `3000` |
+| `RULES_FILE` | Path to the rules file | `rules.json` |
+| `PERP_TICK_MS` | Polling interval | `10000` |
+
+### `rules.json`
+
+```json
+{
+  "market": "BTC-PERP",
+  "side": "long",
+  "entry": { "type": "manual", "timeframe": "10s", "lookback": 20 },
+  "sizing": { "riskPctPerTrade": 2, "maxLeverage": 2, "maxPositionUsd": 50 },
+  "exits": { "stopLossPct": 0.3, "takeProfitPct": 0.3 },
+  "limits": {
+    "maxOpenPositions": 1, "cooldownMinutes": 5, "maxSpreadBps": 5,
+    "maxDailyLossPct": 5, "maxDataAgeSec": 60
+  }
+}
 ```
 
-`quickstart` defaults to the [`starter`](strategies/starter) strategy — the
-simplest bot, where you edit **one function** (`decide()`) and the harness does
-the rest. Watch the dry-run logs, then edit `.env` to add your own funded key and
-set `DRY_RUN=false`.
+Rule sets are validated at startup and rejected if they exceed hard caps (leverage above 10x, risk above 5% per trade, daily loss above 20%).
 
-**Manual setup** (any strategy):
+### Refusal reason codes
 
-```bash
-git clone <this repo> && cd dreamdex-bot-kit
-npm install                       # installs the workspace: core + all TS strategies
+`MAX_LEVERAGE`, `MAX_SIZE`, `MAX_OPEN_POSITIONS`, `COOLDOWN`, `MAX_SPREAD`, `RISK_PER_TRADE`, `DAILY_LOSS`, `STALE_DATA`, `OTHER`.
 
-cp .env.example .env              # add your PRIVATE_KEY, keep NETWORK=testnet
-```
+## The journal contract
 
-**Verify your setup first** — this read-only check prints your wallet, balances, and the live
-order book for every market. No transactions, no risk:
+[`journal-contract/contracts/DecisionJournal.sol`](journal-contract/contracts/DecisionJournal.sol)
 
-```bash
-npx tsx scripts/doctor.ts
-```
+- `publishRules(json)`: emits the rule set and stores its hash.
+- `log(action, side, reason, market, ref, note)`: appends a `TRADE` or `REFUSED` entry stamped with the active rule hash. A trade must carry no reason and a refusal must carry one.
+- `getEntries(offset, limit)` and `entryCount()`: paginated reads. Each write also emits an `EntryLogged` event.
+- Only authorized writers (the deployer and any address it adds) can write.
 
-Then run a bot. Every strategy defaults to **`DRY_RUN=true`** — it logs exactly what it *would*
-do without sending anything. Watch it, then set `DRY_RUN=false` in `.env` to go live:
+Tests: `cd journal-contract && npm test` (six tests covering ordering, reason rules, access control and pagination).
 
-```bash
-npm run dev -w market-making      # or: grid · momentum · mean-reversion · twap · ensemble
-```
+## Limitations
 
-**Backtest first** (no private key required — historical candles + simulated fills):
+- **Exits only work while the bot runs.** With a trading key, the take-profit and stop-loss are watched by the bot, not armed on the exchange. If the process stops, the position stays open.
+- **Exit levels are set from the live mark** when the bot starts watching, not from the fill price.
+- **Equity is configured** with `PERP_EQUITY_USDSO`, not read from the account.
+- **No AI parser yet.** Rules are written by hand; turning plain English into a rule set is planned.
+- **Not yet used:** Somnia Reactivity. The bot polls every 10 seconds.
+- Testnet only. This is not financial advice, and the checks reduce risk but do not make a strategy profitable.
 
-```bash
-npm run backtest -- review --symbol WETH:USDso --interval 5m --days 7
-npm run backtest -- run momentum --days 3 --quiet
-```
+## X posts
 
-See [docs/backtesting.md](docs/backtesting.md) for the full CLI, cost model, and how to add an adapter.
+1. https://x.com/Ghost_Trader9/status/2119372462261473571
+2. https://x.com/Ghost_Trader9/status/2120126459561873670
+3. _add link_
 
-**Python** (same strategies, on the Python core):
+## Credits
 
-```bash
-cd strategies/market-making/python
-pip install -r requirements.txt   # installs packages/core-py (web3)
-cp .env.example .env
-python -m bot
-```
-
-Start on **Shannon testnet** (`NETWORK=testnet`, chain `50312`) with small size before you touch
-mainnet (`5031`). Get testnet funds at [testnet.somnia.network](https://testnet.somnia.network).
-New to all this? Read [docs/getting-started.md](docs/getting-started.md) end to end.
-
-**Deploy on Railway (24/7 worker, no local Node):** see [docs/railway.md](docs/railway.md).
-
-[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/deploy/pE6EIF)
-
-### Helper scripts
-
-Small read-only / cleanup utilities in [`scripts/`](scripts) (run with `npx tsx scripts/<name>.ts`):
-`doctor.ts` (setup + balance check), `operator-setup.ts` (one-time [session-key](docs/session-keys.md) setup), `inspect-and-clean.ts` (list & cancel any open orders),
-`one-ioc.ts` (place a single IOC order to test the full lifecycle), `backtest.ts` ([historical replay](docs/backtesting.md) — also `npm run backtest`),
-`order-history.ts` (market-wide order + fill history for a time window, from the markets indexer — `SYMBOL=USDC.e:USDso FROM=2026-10-02 npx tsx scripts/order-history.ts`).
-
-## Networks
-
-| | Mainnet | Shannon testnet |
-| --- | --- | --- |
-| Chain ID | `5031` | `50312` |
-| RPC | `https://api.infra.mainnet.somnia.network` | `https://dream-rpc.somnia.network` |
-| REST API | `https://api.dreamdex.io/v0` | `https://stg.api.dreamdex.io/v0` |
-| WebSocket | `wss://api.dreamdex.io/v0/ws/public` | `wss://stg.api.dreamdex.io/v0/ws/public` |
-
-Contract addresses are in [`packages/core`](packages/core) and always re-fetchable at runtime
-from `GET /v0/markets` — never hard-code them in your own strategy.
-
-## License & disclaimer
-
-Licensed under the [MIT License](LICENSE) (© DreamDEX S.A.).
-
-Please read the [**Legal Disclaimer**](DISCLAIMER.md) before using anything here. In short: this is
-educational reference code — **not financial advice, and not audited.** Any strategy can lose funds.
-You are responsible for the keys you load, the parameters you set, and the orders you sign. Test on
-testnet first.
-
-
-Transactions has been made on the bot
-
-Order id: 8116567392432212187748
-
-transactions hash: 0x625bc3977b1211fd83553307b06ef83e7e566d37b8d1bdd683e62608cbc5d390
+Built on the [dreamDEX bot kit](https://github.com/somnia-chain/dreamdex-bot-kit) (MIT, DreamDEX S.A.). The `perp-journal` strategy is derived from the kit's `perp-starter`.

@@ -31,3 +31,15 @@ watching, so Ctrl-C cancels them and reclaims the SOMI. Set
 the bot cannot arm stop orders for your account. It watches the take-profit and
 stop-loss itself and closes the position when the mark crosses one, so they only
 act while the bot runs. Leverage stays whatever your account has set in the app.
+# perp-journal
+
+A rule-guarded perps bot for dreamDEX. It reads `rules.json`, runs pre-trade safety checks, trades on the Somnia Tokyo testnet, and writes every trade and every refusal to the `DecisionJournal` contract.
+
+Derived from the kit's `perp-starter` (MIT, DreamDEX S.A.). See the repository root README for what it does, how to run it, and the proof transactions.
+
+```bash
+# dry run, with refusals journaled
+JOURNAL_IN_DRY_RUN=true npm run dev -w perp-journal
+```
+
+Files: `src/index.ts` (the bot), `src/rules.ts` (rule format and checks), `src/journal.ts` (contract client), `rules.json` (your strategy).
